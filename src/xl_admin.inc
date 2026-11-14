@@ -9,8 +9,13 @@
 //  timings follow upstream so the stock app and companion firmware work as-is.
 // ═════════════════════════════════════════════════════════════════════════════
 
+#ifdef SPECTER_COMPANION                       // companion: no remote admin of this node; RAM goes to contacts
+#define XL_MAX_CLIENTS   2
+#define XL_MAX_NEIGHB    8
+#else
 #define XL_MAX_CLIENTS   12
 #define XL_MAX_NEIGHB    128      // upstream: 50 full keys; we keep 8-byte prefixes (the app asks for 4)
+#endif
 #define XL_NB_PFX        8
 #define PERM_ACL_GUEST   0
 #define PERM_ACL_ADMIN   3
@@ -183,7 +188,8 @@ static void ecdh(uint8_t secret[32], const uint8_t peer_pub[32]) {
 // ── sending ─────────────────────────────────────────────────────────────────
 
 // Flood reply, scoped like the request (sendFloodReply): region idx, or -1 un-scoped.
-static void xl_send_flood(uint8_t ptype, const uint8_t* payload, int plen, uint8_t hash_size, int scope, uint32_t delay) {
+// Both senders return the raw packet length (the companion needs it for its timeouts), or -1.
+static int xl_send_flood(uint8_t ptype, const uint8_t* payload, int plen, uint8_t hash_size, int scope, uint32_t delay) {
     uint8_t hdr = (ptype << 2);
     uint16_t tc[2] = { 0, 0 };
     if (scope < 0 && cfg.default_region < cfg.num_regions) scope = cfg.default_region;
@@ -193,16 +199,18 @@ static void xl_send_flood(uint8_t ptype, const uint8_t* payload, int plen, uint8
     uint8_t h[8];
     packet_hash(h, ptype, 0, payload, plen);
     mark_seen(h);
-    txq_push(out_buf, n, 1, delay);
+    if (n < 0 || txq_push(out_buf, n, 1, delay) < 0) return -1;
+    return n;
 }
 
-static void xl_send_direct(uint8_t ptype, const uint8_t* payload, int plen, uint8_t path_len, const uint8_t* path, uint32_t delay) {
+static int xl_send_direct(uint8_t ptype, const uint8_t* payload, int plen, uint8_t path_len, const uint8_t* path, uint32_t delay) {
     int pbytes = (path_len & 63) * ((path_len >> 6) + 1);
     int n = build(out_buf, (ptype << 2) | ROUTE_DIRECT, NULL, path_len, path, pbytes, payload, plen);
     uint8_t h[8];
     packet_hash(h, ptype, path_len, payload, plen);
     mark_seen(h);
-    txq_push(out_buf, n, 0, delay);
+    if (n < 0 || txq_push(out_buf, n, 0, delay) < 0) return -1;
+    return n;
 }
 
 // Datagram (REQ/RESPONSE/TXT_MSG) to a client: direct via its out_path, else flood.
@@ -329,7 +337,11 @@ static void xl_login_result(bool ok) {
 
 // Recent login attempts (Halo Keymind Cascade LoginHistory, 1.18.0.1): the 16 most
 // recently tried keys, newest first, recorded after the request decrypts. RAM only.
+#ifdef SPECTER_COMPANION
+#define LH_N 2
+#else
 #define LH_N 16
+#endif
 enum { LH_ACCEPTED, LH_WRONG_PW, LH_GUESTS_OFF, LH_REPLAY };
 struct LoginRec { uint8_t pfx[8]; uint32_t ts, n; uint8_t res; };
 static LoginRec xl_lh[LH_N];

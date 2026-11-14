@@ -7,6 +7,18 @@ Version numbers follow the official MeshCore firmware release this one tracks
 fourth number for our own releases on that base. That number resets to 1 when
 upstream moves. Releases before 1.17.1.1 used internal numbers 2.0–2.6.
 
+## [Unreleased]
+
+### Added
+- **Companion build** (`specter_companion`, `specter_companion_eu`; 128 KB chips, flash the `.hex`): the MeshCore app connects over USB serial and uses the node as its radio, following upstream `examples/companion_radio` (protocol version 14). Contacts (32), direct messages with ACKs and path learning, channels (8, Public preset), offline message queue, own advert / export / import, radio and TX power from the app, login / status / telemetry / binary and anonymous requests to repeaters and room servers, remote CLI, path discovery, trace, RX log, stats, answers to telemetry requests (as the app's telemetry setting allows), multi-ACKs. App frames (`<`) and the text console share the port. Contacts are saved in two alternating 6 KB copies at 0x0801CC00. It does not repeat. See README
+- `RUN_CLI_COMMAND` from the app runs any console command
+
+### Not included in the companion
+- Sharing / exporting other nodes' contacts (adverts aren't stored), signing, raw packets, channel data, client repeat, private key export/import, BLE PIN (stored and reported only)
+
+### Changed
+- Host tests: the XL tests now also build on macOS (the upper-half marker's section attribute is target-only)
+
 ## [1.18.0.5] - 2026-11-10
 
 Power and battery-reading improvements from [vaddieg/meshcore-specter-dx-lr30](https://github.com/vaddieg/meshcore-specter-dx-lr30), another SPECTER fork with measurements on a battery-powered DX-LR30.

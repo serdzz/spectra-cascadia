@@ -25,3 +25,9 @@ extends = env:specter_eu, offline
 
 [env:xl_eu]
 extends = env:specter_xl_eu, offline
+
+[env:companion]
+extends = env:specter_companion, offline
+
+[env:companion_eu]
+extends = env:specter_companion_eu, offline

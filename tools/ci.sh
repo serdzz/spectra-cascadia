@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full release check: host tests, then all four release builds, then image sanity.
+# Full release check: host tests, then all six release builds, then image sanity.
 # Used by the upstream-sync task and by GitHub Actions.
 #   tools/ci.sh            # offline toolchain (tools/offline/setup.sh)
 #   CI_ONLINE=1 tools/ci.sh  # normal PlatformIO registry (GitHub Actions)
@@ -21,11 +21,11 @@ fail() {  # title file
 }
 
 if [ -n "${CI_ONLINE:-}" ]; then
-  CONF=platformio.ini; ENVS=(specter specter_xl specter_eu specter_xl_eu)
+  CONF=platformio.ini; ENVS=(specter specter_xl specter_eu specter_xl_eu specter_companion specter_companion_eu)
   CRYPTO_DIR="${CRYPTO_DIR:?}"; MESHCORE_DIR="${MESHCORE_DIR:?}"
 else
   [ -f platformio-offline.ini ] || tools/offline/setup.sh
-  CONF=platformio-offline.ini; ENVS=(us xl eu xl_eu)
+  CONF=platformio-offline.ini; ENVS=(us xl eu xl_eu companion companion_eu)
   CRYPTO_DIR="$DEPS/libs/Crypto"; MESHCORE_DIR="$DEPS/MeshCore"
 fi
 
@@ -44,12 +44,14 @@ cp "$B/${ENVS[0]}/firmware.bin" "$OUT/spectra-cascadia-$VER-us.bin"
 cp "$B/${ENVS[1]}/firmware.hex" "$OUT/spectra-cascadia-$VER-xl-us.hex"
 cp "$B/${ENVS[2]}/firmware.bin" "$OUT/spectra-cascadia-$VER-eu.bin"
 cp "$B/${ENVS[3]}/firmware.hex" "$OUT/spectra-cascadia-$VER-xl-eu.hex"
+cp "$B/${ENVS[4]}/firmware.hex" "$OUT/spectra-cascadia-$VER-companion-us.hex"
+cp "$B/${ENVS[5]}/firmware.hex" "$OUT/spectra-cascadia-$VER-companion-eu.hex"
 
 echo "== image checks"
 python3 - "$OUT" "$VER" > "$OUT/images.log" 2>&1 <<'PY' || fail "image checks" "$OUT/images.log"
 import sys, glob, os
 out, ver = sys.argv[1], sys.argv[2]
-for hx in glob.glob(f"{out}/spectra-cascadia-{ver}-xl-*.hex"):
+for hx in glob.glob(f"{out}/spectra-cascadia-{ver}-xl-*.hex") + glob.glob(f"{out}/spectra-cascadia-{ver}-companion-*.hex"):
     segs, base = [], 0
     for l in open(hx):
         t = int(l[7:9], 16)
@@ -58,6 +60,8 @@ for hx in glob.glob(f"{out}/spectra-cascadia-{ver}-xl-*.hex"):
             a = base + int(l[3:7], 16); segs.append((a, a + int(l[1:3], 16)))
     bad = [s for s in segs if s[0] < 0x08010000 and s[1] > 0x0800F800] + [s for s in segs if s[1] > 0x0801FC00]
     assert not bad, f"{hx}: data in the settings or admin-list pages"
+    if "-companion-" in hx:   # 0x0801CC00-0x0801FBFF: contact store (specter_companion.ld)
+        assert not [s for s in segs if s[1] > 0x0801CC00], f"{hx}: data in the contact store pages"
     print(f"{os.path.basename(hx)}: low end {max(b for a,b in segs if a < 0x08010000):#x}, high end {max(b for a,b in segs):#x}")
 for bn in glob.glob(f"{out}/spectra-cascadia-{ver}-*.bin"):
     n = os.path.getsize(bn); assert n <= 63488, f"{bn}: {n} > 62 KB"

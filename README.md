@@ -143,6 +143,45 @@ Host tests (`test/host/test_xl.cpp`) check the key exchange against upstream
 MeshCore's own ed25519 code. They also run login, PATH learning, status, telemetry,
 neighbours, the access list, remote CLI, the legacy ACK and replay rejection end to end.
 
+### Companion build: the MeshCore app over USB
+
+The **companion** build turns a DX-LR30 into the radio for the MeshCore app (phone with
+USB OTG, desktop, or the web app over Web Serial). Plug it in and connect to its serial
+port at 115200 baud. It is a separate firmware, not a mode of the repeater: **it does
+not repeat**. It needs a 128 KB chip, like XL (run `tools/flash128_test` first), and
+is flashed the same way, as a `.hex` (`spectra-cascadia-…-companion-us.hex` / `-eu.hex`,
+or `pio run -e specter_companion -t upload`).
+
+| From the MeshCore app | Companion |
+|---|---|
+| Contacts: auto-add from adverts, manual add mode, auto-add by type and hop limit, edit, remove, reset path, import an advert | ✓ (32 contacts) |
+| Direct messages with delivery ACKs, path learning (flood first, then direct) | ✓ |
+| Channels: Public and #hashtag / private channels | ✓ (8) |
+| Messages received while the app is closed | ✓ (about 1 KB of queue: channel messages give way to DMs) |
+| Send our advert (zero-hop or flood), export our own contact, name, location, radio, TX power | ✓ |
+| Log in to repeaters and room servers, status, telemetry, remote CLI, path discovery, trace, anonymous queries (owner info, regions, clock) | ✓ |
+| RX log, stats, battery | ✓ |
+| Answering others' telemetry requests (battery, MCU temperature), per the app's telemetry setting | ✓ |
+| Sharing or exporting *another* node's contact (needs its stored advert) | ✗ |
+| Signing, raw packets, channel data, client repeat, private key export | ✗ |
+
+The text console still works on the same port: app frames start with `<`, and anything
+else is a command (`get name`, `ver`, `region default …`, `log start`, …). Once the app
+has connected, the node stops printing anything it wasn't asked for, because the app
+reads `>` as the start of a frame. The flood scope (region) for everything the companion
+sends is the console's `region default`.
+
+Contacts, channels and app settings are kept at 0x0801CC00–0x0801FBFF, in two 6 KB
+copies written alternately. A power cut while saving loses at most the latest change.
+Upgrading with the `.hex` keeps them, and so does going back to a repeater build.
+Flashing a companion onto a repeater keeps the node's identity, name and radio settings.
+
+`test/host/test_companion.cpp` drives the serial protocol the way the app does and talks to
+the node over the air with upstream MeshCore's ed25519. It covers handshake, contacts, DMs
+and ACKs both ways, path learning, channels, repeater login/status, anonymous requests,
+trace, persistence (including a torn save), the offline queue and framing resync.
+**Not yet tested with the app on real hardware.**
+
 ### v2.3.1: quieter adverts
 
 Defaults are now **no periodic zero-hop adverts** and **a flood advert every 83 hours**,
@@ -601,7 +640,7 @@ Use Sketch → Export Compiled Binary and check the size stays under 63,488 byte
 
 ```bash
 git clone https://github.com/rweather/arduinolibs
-git clone https://github.com/meshcore-dev/MeshCore      # only for the XL tests
+git clone https://github.com/meshcore-dev/MeshCore      # only for the XL and companion tests
 CRYPTO_DIR=$PWD/arduinolibs/libraries/Crypto MESHCORE_DIR=$PWD/MeshCore ./test/host/run.sh
 ```
 

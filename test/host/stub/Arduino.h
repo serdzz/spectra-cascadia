@@ -35,6 +35,8 @@ struct FakeSerial {
   char read() { char c = in[0]; in.erase(0, 1); return c; }
   void flush() {}
   void begin(int) {}
+  size_t write(uint8_t b) { out += (char)b; return 1; }
+  size_t write(const uint8_t* b, size_t n) { out.append((const char*)b, n); return n; }
   void print(const char* v) { out += v; }
   void print(char* v) { out += v; }
   void print(char v) { out += v; }

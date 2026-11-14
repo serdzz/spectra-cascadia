@@ -19,6 +19,9 @@ if [ -n "${MESHCORE_DIR:-}" ]; then
   g++ -std=gnu++17 -O1 -w -Istub -I"$CR" -I"$ED" test_xl.cpp "${CSRC[@]}" \
     "$CR"/AES128.cpp "$CR"/AESCommon.cpp "$CR"/BlockCipher.cpp "$OUT"/orlp/*.o -o "$OUT/specter_xl_test"
   "$OUT/specter_xl_test"
+  g++ -std=gnu++17 -O1 -w -Istub -I"$CR" -I"$ED" test_companion.cpp "${CSRC[@]}" \
+    "$CR"/AES128.cpp "$CR"/AESCommon.cpp "$CR"/BlockCipher.cpp "$OUT"/orlp/*.o -o "$OUT/specter_companion_test"
+  "$OUT/specter_companion_test"
 else
-  echo "(XL tests skipped: set MESHCORE_DIR)"
+  echo "(XL and companion tests skipped: set MESHCORE_DIR)"
 fi

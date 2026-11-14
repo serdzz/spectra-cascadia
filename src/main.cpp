@@ -48,6 +48,18 @@
 #endif
 
 #define FW_NAME    "Spectra-Cascadia"
+
+// -DSPECTER_COMPANION (with SPECTER_XL): a MeshCore *companion* instead of a repeater.
+// The MeshCore app talks to it over the same USB serial port as the text console
+// (binary frames start with '<'); see src/companion.inc. It does not forward packets.
+#if defined(SPECTER_COMPANION) && !defined(SPECTER_XL)
+#error "SPECTER_COMPANION needs SPECTER_XL (the 128 KB layout and its crypto)"
+#endif
+#if defined(ARDUINO_ARCH_STM32) && defined(SERIAL_UART_INSTANCE) && SERIAL_UART_INSTANCE == 1
+// "Serial" is then Serial1 and the core puts it on PIN_SERIAL_RX/TX, whose variant default
+// (PA3/PA2) is USART2 = our radio's NRST/BUSY. The console must stay on PA10/PA9 (the CH340).
+static_assert(PIN_SERIAL_RX == PA10 && PIN_SERIAL_TX == PA9, "Serial1 must stay on PA10/PA9");
+#endif
 #define FW_VERSION "v1.18.0.5"   // upstream MeshCore version + our release number
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -781,7 +793,11 @@ static void clock_sample(const uint8_t* pubkey, uint32_t ts, uint8_t hops, int p
 // ═════════════════════════════════════════════════════════════════════════════
 //  Dedup table — 8-byte prefix of SHA256(type [‖ path_len for TRACE] ‖ payload)
 // ═════════════════════════════════════════════════════════════════════════════
+#ifdef SPECTER_COMPANION
+#define DEDUP_SIZE 96
+#else
 #define DEDUP_SIZE 128
+#endif
 static uint8_t dedup_buf[DEDUP_SIZE][8];
 static uint8_t dedup_head = 0;
 
@@ -823,7 +839,10 @@ static Radio* radio_p = NULL;
 #define radio (*radio_p)
 // Linked last into the upper 64 KB: if it reads back, that half was flashed.
 #define XL_MAGIC 0x4C584353UL
-__attribute__((section(".xl_magic"), used)) static const volatile uint32_t xl_magic_word = XL_MAGIC;
+#if defined(ARDUINO_ARCH_STM32)
+__attribute__((section(".xl_magic"), used))
+#endif
+static const volatile uint32_t xl_magic_word = XL_MAGIC;
 #else
 Radio radio(new Module(PIN_NSS, PIN_DIO1, PIN_NRST, PIN_BUSY, SPI));
 #endif
@@ -1253,7 +1272,11 @@ static int rr_snr4(const uint8_t* pfx, uint8_t len) {
 //  forwarding a direct packet, or anyone forwarding our flood further) before
 //  the wait expires, resend it, escalating the coding rate on direct retries.
 // ═════════════════════════════════════════════════════════════════════════════
+#ifdef SPECTER_COMPANION
+#define RT_SLOTS 1             // a companion never forwards, so it never retries a relay
+#else
 #define RT_SLOTS 4
+#endif
 struct RetrySlot {
     bool     used, direct, armed;
     uint8_t  hash[8];
@@ -1957,6 +1980,10 @@ static const char* handle_flood(const Pkt& p, int8_t snr4) {
     return NULL;
 }
 
+#ifdef SPECTER_COMPANION
+static void comp_on_receive(const uint8_t* d, int len, int8_t snr4);
+static void on_receive(const uint8_t* d, int len, int8_t snr4) { comp_on_receive(d, len, snr4); }
+#else
 static void on_receive(const uint8_t* d, int len, int8_t snr4) {
     Pkt p;
     const char* why;
@@ -1972,18 +1999,26 @@ static void on_receive(const uint8_t* d, int len, int8_t snr4) {
     q_mode = Q_OWN;
 #endif
 }
+#endif
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  Adverts (Mesh::createAdvert + sendZeroHop / sendFloodScoped)
 // ═════════════════════════════════════════════════════════════════════════════
-static void send_advert(bool flood) {
-    uint8_t payload[100 + MAX_ADVERT_DATA_SIZE];
+#ifdef SPECTER_COMPANION
+#define ADV_TYPE_SELF 0x01                // chat node
+static bool comp_advert_loc(void);
+#else
+#define ADV_TYPE_SELF ADV_TYPE_REPEATER
+static inline bool comp_advert_loc(void) { return true; }
+#endif
+
+// Signed advert payload (pub key, timestamp, signature, app data); returns its length.
+static int make_advert(uint8_t* payload, uint32_t ts) {
     memcpy(payload, own_pubkey, 32);
-    uint32_t ts = clock_now();
     memcpy(payload + 32, &ts, 4);
     int i = 100;
-    bool has_loc = cfg.lat_e6 || cfg.lon_e6;
-    payload[i++] = ADV_TYPE_REPEATER | ADV_NAME_MASK | (has_loc ? ADV_LATLON_MASK : 0);
+    bool has_loc = (cfg.lat_e6 || cfg.lon_e6) && comp_advert_loc();
+    payload[i++] = ADV_TYPE_SELF | ADV_NAME_MASK | (has_loc ? ADV_LATLON_MASK : 0);
     if (has_loc) { memcpy(payload + i, &cfg.lat_e6, 4); memcpy(payload + i + 4, &cfg.lon_e6, 4); i += 8; }
     int nlen = strlen(cfg.name), room = 100 + MAX_ADVERT_DATA_SIZE - i;
     if (nlen > room) nlen = room;
@@ -1994,6 +2029,13 @@ static void send_advert(bool flood) {
     memcpy(msg + 36, payload + 100, i - 100);
     IWatchdog.reload();
     Ed25519::sign(payload + 36, cfg.privkey, own_pubkey, msg, 36 + i - 100);
+    return i;
+}
+
+static void send_advert(bool flood) {
+    uint8_t payload[100 + MAX_ADVERT_DATA_SIZE];
+    uint32_t ts = clock_now();
+    int i = make_advert(payload, ts);
 
     uint8_t h[8];
     packet_hash(h, PT_ADVERT, 0, payload, i);
@@ -2093,7 +2135,12 @@ static void reset_reason_capture(bool cutoff_wake) {
     else if (c & (1UL << 26))       reset_why = "reset pin";
     bkp_set(3, wdt_resets);
 }
-static void reboot_now(void) { bkp_set(2, BKP_REBOOT_MARK); NVIC_SystemReset(); }
+#ifdef SPECTER_COMPANION
+static void comp_flush(void);
+#else
+static inline void comp_flush(void) {}
+#endif
+static void reboot_now(void) { comp_flush(); bkp_set(2, BKP_REBOOT_MARK); NVIC_SystemReset(); }
 
 // Put the SX1262 in cold sleep with raw SPI (works before/without radio.begin()).
 static void radio_cold_sleep(void) {
@@ -2134,7 +2181,11 @@ static int temp_c(void) {                         // internal sensor: V25 ≈ 1.
 }
 
 // Telemetry history: one sample every 30 min, 7 days, newest overwrites oldest.
+#ifdef SPECTER_COMPANION
+#define TELE_N 2               // history is only served to remote admins, which a companion doesn't have
+#else
 #define TELE_N 336
+#endif
 #define TELE_IV_S 1800UL
 static uint16_t tele_mv[TELE_N];
 static int8_t   tele_t[TELE_N];
@@ -2166,6 +2217,7 @@ static void cutoff_shutdown(uint32_t mv) {
     }
 #endif
     journal_write(clock_now(), j_last_flood_ts);
+    comp_flush();                                      // companion: unsaved contact changes
     bkp_write(CUTOFF_FLAG);
     radio_cold_sleep();
     digitalWrite(PIN_LED, LOW);
@@ -2615,6 +2667,9 @@ static void clock_status(char* reply) {
 #ifdef SPECTER_XL
 static void handle_command_from(char* cmd, char* reply, uint32_t sender_ts);
 #include "xl_admin.inc"
+#endif
+#ifdef SPECTER_COMPANION
+#include "companion.inc"
 #endif
 
 #ifdef SPECTER_XL
@@ -3344,26 +3399,47 @@ XL_HI static void handle_command_from(char* cmd, char* reply, uint32_t sender_ts
 static char    cli_buf[160];
 static uint8_t cli_len = 0;
 static bool    cli_last_cr = false;
+#ifdef SPECTER_COMPANION
+static uint32_t cli_last_ms = 0;     // when the console line last got a character
+#endif
 
 static void cli_poll(void) {
+#ifdef SPECTER_COMPANION
+    bool quiet = comp_quiet();       // the app is listening: no echo, no replies to line noise
+#else
+    const bool quiet = false;
+#endif
     while (Serial1.available()) {
         char c = Serial1.read();
+#ifdef SPECTER_COMPANION
+        // Opening the port often hands the MCU a junk byte (CH340 line glitch). Control bytes and
+        // bytes that can't be UTF-8 never go into a console line, so they can't hide the app's '<'.
+        uint8_t u = (uint8_t)c;
+        if ((u < 0x20 && c != '\r' && c != '\n' && c != '\t' && c != 8) || u >= 0xF8) { if (!comp_frame_open()) continue; }
+        // '<' starts an app frame on an empty line, or on a line nobody has typed into for 0.5 s
+        // (leftovers of an earlier attempt); a half-typed line is dropped.
+        bool line_idle = cli_len == 0 || millis() - cli_last_ms > 500;
+        if (comp_serial_byte(u, line_idle)) { cli_len = 0; continue; }
+#endif
         bool lf_after_cr = (c == '\n' && cli_last_cr);   // accept CR, LF or CRLF line endings
         cli_last_cr = (c == '\r');
         if (lf_after_cr) continue;
         if (c == '\r' || c == '\n' || cli_len >= sizeof(cli_buf) - 1) {
-            Serial1.print('\n');
+            if (!quiet) Serial1.print('\n');
             cli_buf[cli_len] = 0;
             char reply[176];
             handle_command(cli_buf, reply);
-            if (reply[0]) { Serial1.print("  -> "); Serial1.println(reply); }
+            if (reply[0] && !(quiet && !strcmp(reply, "Unknown command"))) { Serial1.print("  -> "); Serial1.println(reply); }
             cli_len = 0;
             if (reboot_pending) { Serial1.flush(); delay(50); reboot_now(); }
             continue;
         }
-        if (c == 8 || c == 127) { if (cli_len) { cli_len--; Serial1.print("\b \b"); } continue; }
+        if (c == 8 || c == 127) { if (cli_len) { cli_len--; if (!quiet) Serial1.print("\b \b"); } continue; }
         cli_buf[cli_len++] = c;
-        Serial1.print(c);
+#ifdef SPECTER_COMPANION
+        cli_last_ms = millis();
+#endif
+        if (!quiet) Serial1.print(c);
     }
 }
 
@@ -3462,7 +3538,11 @@ void setup(void) {
     }
     delay(200);
     Serial1.println();
+#ifdef SPECTER_COMPANION
+    Serial1.println(FW_NAME " MeshCore Companion " FW_VERSION);
+#else
     Serial1.println(FW_NAME " MeshCore Repeater " FW_VERSION);
+#endif
     Serial1.print("Last reset: "); Serial1.println(reset_why);
     if (woke) Serial1.println("Battery recovered: resuming");
     if (!radio_init()) {
@@ -3483,6 +3563,9 @@ void setup(void) {
     }
     Ed25519::derivePublicKey(own_pubkey, cfg.privkey);
     clock_init();
+#ifdef SPECTER_COMPANION
+    comp_init();                            // contacts; may move the clock forward
+#endif
 
     char a[16], b[16];
     Serial1.print("Name: "); Serial1.println(cfg.name);
@@ -3492,10 +3575,15 @@ void setup(void) {
     Serial1.println(radio_has_tcxo ? "(tcxo)" : "(xtal)");
     Serial1.print("Power: "); Serial1.print(SystemCoreClock / 1000000UL); Serial1.print(" MHz, battery ");
     Serial1.print(battery_mv()); Serial1.println(" mV");
+#if defined(SPECTER_COMPANION)
+    // No '>' in anything printed unasked: the app reads '>' as the start of a frame.
+    Serial1.println("MeshCore app: connect on this port. Console: 'get name', 'ver', 'log start' ...");
+#else
 #ifdef SPECTER_XL
     Serial1.println(auth.admin_pw[0] ? "App login: on" : "App login: off (set one with 'password <x>')");
 #endif
     Serial1.println("Type 'get name', 'set name <x>', 'region', 'log start' ...");
+#endif
 
     budget_ms = budget_max() / 2;
     budget_updated = millis();
@@ -3550,6 +3638,9 @@ void loop(void) {
         return;
     }
 
+#ifdef SPECTER_COMPANION
+    comp_service();                       // a companion adverts only when the app asks
+#else
     if (cfg.flood_advert_h && (int32_t)(up - next_flood_advert_s) >= 0) {
         send_advert(true);
         next_flood_advert_s = up + cfg.flood_advert_h * 3600UL;
@@ -3558,6 +3649,7 @@ void loop(void) {
         send_advert(false);
         next_local_advert_s = up + cfg.advert_interval_min * 60UL;
     }
+#endif
 
     rt_service();
     txq_service(irq);
